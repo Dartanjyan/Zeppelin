@@ -52,7 +52,7 @@ print("Start Zeppelin")
 
 while true do
     if not isAutopilotEnabled() then
-        setLinkSignal(FREQUENCIES.THRUSTERS.main(getLinkSignal(FREQUENCIES.KEYS.forward)))
+        setLinkSignal(FREQUENCIES.THRUSTERS.main, getLinkSignal(FREQUENCIES.KEYS.forward))
     end
 
     os.sleep(0)
