@@ -38,11 +38,13 @@ local function calculateFuelConsumption()
 end
 
 local function updateMonitor()
-    monitor.clear()
-    monitor.setCursorPos(1, 1)
-    monitor.write("Fuel: " .. math.floor(FUEL / 1000 + 0.5) .. "B")
-
-    os.sleep(1)
+    while true do
+        monitor.clear()
+        monitor.setCursorPos(1, 1)
+        monitor.write("Fuel: " .. math.floor(FUEL / 1000 + 0.5) .. " B")
+        
+        os.sleep(1)
+    end
 end
 
 print("Start Zeppelin")
