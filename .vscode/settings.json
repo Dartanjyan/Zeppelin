@@ -1,7 +1,9 @@
 {
     "Lua.diagnostics.globals": [
         "peripheral",
-        "parallel"
+        "parallel",
+        "colors",
+        "gps"
     ],
     "Lua.diagnostics.disable": [
         "undefined-field"

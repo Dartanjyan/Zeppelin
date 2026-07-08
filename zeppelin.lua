@@ -26,6 +26,30 @@ local function humanizeTime(seconds)
     return table.concat(parts, " ")
 end
 
+local function validateCoordinates(input)
+    -- 1. Удаляем лишние пробелы по бокам
+    local trimmed = input:gsub("^%s+", ""):gsub("%s+$", "")
+
+    -- 2. Проверяем формат с помощью шаблона:
+    -- ^       - начало строки
+    -- (-?%d+) - первое целое число (опционально с минусом)
+    -- %s+     - один или более пробелов
+    -- (-?%d+) - второе целое число
+    -- $       - конец строки
+    local str1, str2 = trimmed:match("^(-?%d+)%s+(-?%d+)$")
+
+    -- 3. Если совпадений нет — возвращаем false
+    if not str1 or not str2 then
+        return false, nil, nil
+    end
+
+    -- 4. Преобразуем в числа
+    local n1 = tonumber(str1)
+    local n2 = tonumber(str2)
+
+    return true, n1, n2
+end
+
 FREQUENCIES = {
     THRUSTERS = {
         main = {"createpropulsion:thruster", "createpropulsion:thruster"},
@@ -37,12 +61,23 @@ FREQUENCIES = {
     }
 }
 
+AUTOPILOT_STATES = {
+    PAUSED = 1,
+    RUNNING = 2,
+    ERROR = 3
+}
+
 -- GLOBAL STATE --
 FUEL_CAPACITY = 1656000
 FUEL = 0
 FUEL_CONSUMPTION = 0  -- in seconds
 FUEL_SECONDS_LEFT = 0
 
+TARGET_X = 0
+TARGET_Z = 0
+TARGET_INPUT_BUFFER = ""
+
+AUTOPILOT_STATE = AUTOPILOT_STATES.PAUSED
 
 local lastFuel = 0
 local function calculateFuelConsumption()
@@ -55,12 +90,66 @@ local function calculateFuelConsumption()
         else
             FUEL_SECONDS_LEFT = FUEL / FUEL_CONSUMPTION
         end
-        os.sleep(1)
+        os.sleep(2)
+    end
+end
+
+local function autopilot()
+    -- Проверить включен ли автопилот
+    -- Взять координаты целевые и лететь туда
+    while true do
+        if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING then
+            local x, y, z = gps.locate()
+        end
+    end
+end
+
+local function userInput()
+    -- Пробел ставит пробел между координатами code 32
+    -- Минус code 45
+    -- Все цифровые ивенты и пробел это набор координат code 48 - 57
+    -- Enter это переключение состояния автопилота code 257
+    -- Backspace ставит автопилот на паузу и стирает цифру координат code 259
+
+    while true do
+        local _, _, key = os.pullEvent("tm_keyboard_key")
+        -- "tm_keyboard_key", "top", keyCode, continuous
+        print(key)
+        local symbol = ""
+        if key == 32 then symbol = " "
+        elseif key == 45 then symbol = "-"
+        elseif key >= 48 and key <= 57 then symbol = tostring(key - 48)
+        elseif key == 257 then
+            if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING then
+                AUTOPILOT_STATE = AUTOPILOT_STATES.PAUSED
+            elseif AUTOPILOT_STATE == AUTOPILOT_STATES.PAUSED or AUTOPILOT_STATE == AUTOPILOT_STATES.ERROR then
+                local success, x, z = validateCoordinates(TARGET_INPUT_BUFFER)
+                if success then
+                    TARGET_INPUT_BUFFER = x .. " " .. z
+                    TARGET_X = x
+                    TARGET_Z = z
+                    AUTOPILOT_STATE = AUTOPILOT_STATES.RUNNING
+                else
+                    AUTOPILOT_STATE = AUTOPILOT_STATES.ERROR
+                end
+            end
+        elseif key == 259 then
+            if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING or AUTOPILOT_STATE == AUTOPILOT_STATES.ERROR then
+                AUTOPILOT_STATE = AUTOPILOT_STATES.PAUSED
+            end
+            if #TARGET_INPUT_BUFFER > 0 then
+                TARGET_INPUT_BUFFER = string.sub(TARGET_INPUT_BUFFER, 1, -2)
+            end
+        end
+
+        TARGET_INPUT_BUFFER = TARGET_INPUT_BUFFER .. symbol
     end
 end
 
 local function updateMonitor()
     while true do
+        monitor.setTextColor(colors.white)
+        monitor.setBackgroundColor(colors.black)
         monitor.clear()
         monitor.setCursorPos(1, 1)
         monitor.write("Fuel: " .. math.floor(FUEL / FUEL_CAPACITY * 1000) / 10 .. "%")
@@ -68,6 +157,27 @@ local function updateMonitor()
         monitor.write("Consumption: " .. FUEL_CONSUMPTION/1000 .. " B/s")
         monitor.setCursorPos(1, 3)
         monitor.write("Time left: " .. humanizeTime(FUEL_SECONDS_LEFT))
+
+        -- Autopilot status bar
+        monitor.setCursorPos(1, 5)
+        monitor.setTextColor(colors.black)
+        if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING then
+            monitor.setBackgroundColor(colors.lime)
+            monitor.clearLine()
+            monitor.write("AUTOPILOT STATE: RUNNING")
+        elseif AUTOPILOT_STATE == AUTOPILOT_STATES.PAUSED then
+            monitor.setBackgroundColor(colors.lightBlue)
+            monitor.clearLine()
+            monitor.write("AUTOPILOT STATE: PAUSED")
+        end
+        monitor.setCursorPos(1, 4)
+        monitor.clearLine()
+        -- Autopilot status bar
+
+        -- Разделитель
+        -- Статус бар автопилота
+        -- Координаты цели
+        -- Остальная инфа
         os.sleep(1)
     end
 end
@@ -76,5 +186,6 @@ print("Start Zeppelin")
 
 parallel.waitForAll(
     calculateFuelConsumption,
-    updateMonitor
+    updateMonitor,
+    userInput
 )
