@@ -1,23 +1,17 @@
 local rslink = peripheral.find("redstone_link_bridge")
 local keyboard = peripheral.find("tm_keyboard")
 local monitor = peripheral.find("monitor")
+local fluidTank = peripheral.find("create:fluid_tank")
 
--- Если включен рычаг на частоте "simulated:linked_typewriter", "simulated:linked_typewriter" то мы в режиме автопилота,
--- иначе в мануальном режиме
+local function getLinkSignal(frequencies)
+    return rslink.getLinkSignal(frequencies[1], frequencies[2])
+end
 
---[[
-    В мануальном режиме
-    W: вперёд
-    S: назад
-    A: влево
-    D: вправо
-    R: вверх
-    F: вниз
-]]
+local function sendLinkSignal(frequencies, signal)
+    rslink.sendLinkSignal(frequencies[1], frequencies[2], signal)
+end
 
 FREQUENCIES = {
-    autopilot = {"simulated:linked_typewriter", "simulated:linked_typewriter"},
-    
     THRUSTERS = {
         main = {"createpropulsion:thruster", "createpropulsion:thruster"},
         frontLeft = {"createpropulsion:thruster", "minecraft:white_wool"},
@@ -28,23 +22,31 @@ FREQUENCIES = {
     }
 }
 
-local function getLinkSignal(frequencies)
-    return rslink.getLinkSignal(frequencies[1], frequencies[2])
+FUEL_CAPACITY = 1656000
+FUEL = 0
+FUEL_CONSUMPTION = 0  -- in seconds
+FUEL_SECONDS_LEFT = 0
+
+local lastFuel = 0
+local function calculateFuelConsumption()
+    FUEL = fluidTank.tanks()[1].amount
+    local deltaFuel = FUEL - lastFuel
+
+    FUEL_CONSUMPTION = deltaFuel
+
+    os.sleep(1)
 end
 
-local function sendLinkSignal(frequencies, signal)
-    rslink.sendLinkSignal(frequencies[1], frequencies[2], signal)
-end
+local function updateMonitor()
+    monitor.clear()
+    monitor.setCursorPos(1, 1)
+    monitor.write("Fuel: " .. math.floor(FUEL / 1000 + 0.5) .. "B")
 
-local function isAutopilotEnabled()
-    return getLinkSignal(FREQUENCIES.autopilot)
+    os.sleep(1)
 end
 
 print("Start Zeppelin")
 
-while true do
-    if isAutopilotEnabled() ~= 0 then
-    end
-
-    os.sleep(0)
-end
+parallel.waitForAll(
+    updateMonitor
+)
