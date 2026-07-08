@@ -17,15 +17,7 @@ local monitor = peripheral.find("monitor")
 
 FREQUENCIES = {
     autopilot = {"simulated:linked_typewriter", "simulated:linked_typewriter"},
-
-    KEYS = {
-        forward = {"simulated:linked_typewriter", "minecraft:white_wool"},
-        left = {"simulated:linked_typewriter", "minecraft:light_gray_wool"},
-        back = {"simulated:linked_typewriter", "minecraft:gray_wool"},
-        right = {"simulated:linked_typewriter", "minecraft:black_wool"},
-        up = {"simulated:linked_typewriter", "minecraft:brown_wool"},
-        down = {"simulated:linked_typewriter", "minecraft:red_wool"}
-    },
+    
     THRUSTERS = {
         main = {"createpropulsion:thruster", "createpropulsion:thruster"},
         frontLeft = {"createpropulsion:thruster", "minecraft:white_wool"},
@@ -40,8 +32,8 @@ local function getLinkSignal(frequencies)
     return rslink.getLinkSignal(frequencies[1], frequencies[2])
 end
 
-local function setLinkSignal(frequencies, signal)
-    rslink.setLinkSignal(frequencies[1], frequencies[2], signal)
+local function sendLinkSignal(frequencies, signal)
+    rslink.sendLinkSignal(frequencies[1], frequencies[2], signal)
 end
 
 local function isAutopilotEnabled()
@@ -51,10 +43,7 @@ end
 print("Start Zeppelin")
 
 while true do
-    if not isAutopilotEnabled() then
-        local thr = getLinkSignal(FREQUENCIES.KEYS.forward)
-        setLinkSignal(FREQUENCIES.THRUSTERS.main, thr)
-        print(thr)
+    if isAutopilotEnabled() ~= 0 then
     end
 
     os.sleep(0)
