@@ -1,4 +1,5 @@
 local rslink = peripheral.find("redstone_link_bridge")
+local rsRelay = peripheral.find("redstone_relay")
 local keyboard = peripheral.find("tm_keyboard")
 local monitor = peripheral.find("monitor")
 local fluidTank = peripheral.find("create:fluid_tank")
@@ -50,16 +51,61 @@ local function validateCoordinates(input)
     return true, n1, n2
 end
 
-FREQUENCIES = {
-    THRUSTERS = {
-        main = {"createpropulsion:thruster", "createpropulsion:thruster"},
-        frontLeft = {"createpropulsion:thruster", "minecraft:white_wool"},
-        frontRight = {"createpropulsion:thruster", "minecraft:light_gray_wool"},
-        backLeft = {"createpropulsion:thruster", "minecraft:gray_wool"},
-        backRight = {"createpropulsion:thruster", "minecraft:black_wool"},
-        steamVent = {"aeronautics:steam_vent", "aeronautics:steam_vent"}
-    }
-}
+local function calculateMovement(x, z, lastX, lastZ, dt)
+    -- Предотвращаем деление на ноль
+    if dt <= 0 then return 0, 0 end
+
+    -- Вычисляем смещение
+    local dx = x - lastX
+    local dz = lastZ - z
+
+    -- Скорость = расстояние / время
+    -- Расстояние = sqrt(dx^2 + dz^2)
+    local distance = math.sqrt(dx * dx + dz * dz)
+    local speed = distance / dt
+
+    -- Направление (угол)
+    -- Используем math.atan2(dx, dz) для соответствия вашей системе:
+    -- +z (dz > 0) = 0 градусов
+    -- +x (dx > 0) = -90 градусов
+    -- -x (dx < 0) = 90 градусов
+    -- -z (dz < 0) = 180 градусов
+    local radians = math.atan2(dx, dz)
+    local degrees = math.deg(radians)
+
+    return speed, degrees
+end
+
+local function humanizeDistance(meters)
+    -- Защита от некорректных данных
+    if not meters or meters < 0 then return "0 m" end
+
+    if meters < 1000 then
+        -- Для метров округляем до целого числа
+        return string.format("%.0f m", meters)
+    else
+        local kilometers = meters / 1000
+        
+        -- Если деление ровное (например, 2000 м -> 2 км), убираем .0
+        if kilometers % 1 == 0 then
+            return string.format("%.0f km", kilometers)
+        else
+            -- Если есть дробная часть, оставляем 1 знак после запятой (например, 1.3 км)
+            return string.format("%.1f km", kilometers)
+        end
+    end
+end
+
+-- FREQUENCIES = {
+--     THRUSTERS = {
+--         main = {"createpropulsion:thruster", "createpropulsion:thruster"},
+--         frontLeft = {"createpropulsion:thruster", "minecraft:white_wool"},
+--         frontRight = {"createpropulsion:thruster", "minecraft:light_gray_wool"},
+--         backLeft = {"createpropulsion:thruster", "minecraft:gray_wool"},
+--         backRight = {"createpropulsion:thruster", "minecraft:black_wool"},
+--         steamVent = {"aeronautics:steam_vent", "aeronautics:steam_vent"}
+--     }
+-- }
 
 AUTOPILOT_STATES = {
     PAUSED = 1,
@@ -79,6 +125,11 @@ TARGET_INPUT_BUFFER = ""
 
 AUTOPILOT_STATE = AUTOPILOT_STATES.PAUSED
 
+SHIP_SPEED = 0
+SHIP_DIRECTION = 0
+
+X, ALTITUDE, Z = 0, 0, 0
+
 local lastFuel = 0
 local function calculateFuelConsumption()
     while true do
@@ -94,13 +145,63 @@ local function calculateFuelConsumption()
     end
 end
 
+local lastX, lastZ, lastClock = 0, 0, 0
+
+local function calculateSpeedAndDirection()
+    while true do
+        local x, ALTITUDE, z = gps.locate()
+        local clock = os.clock()
+        SHIP_SPEED, SHIP_DIRECTION = calculateMovement(x, z, lastX, lastZ, clock - lastClock)
+        lastX, lastZ = x, z
+        X, Z = x, z
+        lastClock = clock
+        os.sleep(1)
+    end
+end
+
+local function isAutopilotLeverEnabled()
+    return rslink.getInput("top")
+end
+
 local function autopilot()
     -- Проверить включен ли автопилот
     -- Взять координаты целевые и лететь туда
     while true do
         if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING then
-            local x, y, z = gps.locate()
+            -- Рассчитать нужный угол
+            -- Градационно в зависимости от ошибки угла подстраивать курс
+            
+            -- Вектор направления на цель
+            local dx = TARGET_X - X
+            -- Применяем ту же инверсию для Z, которая сработала у вас
+            local dz = Z - TARGET_Z
+
+            -- Вычисляем угол в радианах и переводим в градусы
+            local radians = math.atan2(dx, dz)
+            local targetDegrees = math.deg(radians)
+
+            local directionError = targetDegrees - SHIP_DIRECTION
+            if directionError > 180 then directionError = directionError - 360
+            elseif directionError < -180 then directionError = directionError + 360
+            end
+
+            -- 180 макс
+            -- 0 это мин
+            -- -180 макс в другую сторону
+            -- Газ: максимальный при 0 ошибке
+            -- Поворот направо: макс при ошибке 180 и мин при 0
+            -- Поворот налево: макс при ошибке -180 и минимум при нуле
+
+            -- thr = (-16)/180
+            local throttle = (-16)/180 * math.abs(directionError) + 16
+            local rightTurn = 16/180 * directionError
+            local leftTurn = -rightTurn
+
+            rslink.setAnalogOutput("left", leftTurn)
+            rslink.setAnalogOutput("right", rightTurn)
+            rslink.setAnalogOutput("front", throttle)
         end
+        os.sleep(1)
     end
 end
 
@@ -114,15 +215,21 @@ local function userInput()
     while true do
         local _, _, key = os.pullEvent("tm_keyboard_key")
         -- "tm_keyboard_key", "top", keyCode, continuous
-        print(key)
+        -- print(key)
         local symbol = ""
+
+        if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING then
+            AUTOPILOT_STATE = AUTOPILOT_STATES.PAUSED
+        end
+
         if key == 32 then symbol = " "
         elseif key == 45 then symbol = "-"
         elseif key >= 48 and key <= 57 then symbol = tostring(key - 48)
+        elseif key >= 320 and key <= 329 then symbol = tostring(key - 320)
         elseif key == 257 then
-            if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING then
+            --[[if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING then
                 AUTOPILOT_STATE = AUTOPILOT_STATES.PAUSED
-            elseif AUTOPILOT_STATE == AUTOPILOT_STATES.PAUSED or AUTOPILOT_STATE == AUTOPILOT_STATES.ERROR then
+            else]]if AUTOPILOT_STATE == AUTOPILOT_STATES.PAUSED or AUTOPILOT_STATE == AUTOPILOT_STATES.ERROR then
                 local success, x, z = validateCoordinates(TARGET_INPUT_BUFFER)
                 if success then
                     TARGET_INPUT_BUFFER = x .. " " .. z
@@ -162,23 +269,44 @@ local function updateMonitor()
         monitor.setCursorPos(1, 5)
         monitor.setTextColor(colors.black)
         if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING then
-            monitor.setBackgroundColor(colors.lime)
-            monitor.clearLine()
+            -- monitor.setBackgroundColor(colors.lime)
+            -- monitor.clearLine()
+            monitor.setTextColor(colors.lime)
             monitor.write("AUTOPILOT STATE: RUNNING")
         elseif AUTOPILOT_STATE == AUTOPILOT_STATES.PAUSED then
-            monitor.setBackgroundColor(colors.lightBlue)
-            monitor.clearLine()
+            -- monitor.setBackgroundColor(colors.lightBlue)
+            -- monitor.clearLine()
+            monitor.setTextColor(colors.lightBlue)
             monitor.write("AUTOPILOT STATE: PAUSED")
+        elseif AUTOPILOT_STATE == AUTOPILOT_STATES.ERROR then
+            -- monitor.setBackgroundColor(colors.red)
+            -- monitor.clearLine()
+            monitor.setTextColor(colors.red)
+            monitor.write("AUTOPILOT STATE: ERROR")
         end
+        
         monitor.setCursorPos(1, 4)
+        monitor.clearLine()
+        monitor.setCursorPos(1, 6)
         monitor.clearLine()
         -- Autopilot status bar
 
-        -- Разделитель
-        -- Статус бар автопилота
-        -- Координаты цели
-        -- Остальная инфа
-        os.sleep(1)
+        monitor.setBackgroundColor(colors.black)
+        monitor.setTextColor(colors.white)
+
+        monitor.setCursorPos(1, 7)
+        monitor.write("Target: " .. TARGET_INPUT_BUFFER)
+        monitor.setCursorPos(1, 8)
+        monitor.write("Speed: " .. math.floor(SHIP_SPEED * 3.6 * 100) / 100 .. " km/h")
+        if isAutopilotLeverEnabled() then
+            local dx, dz = TARGET_X - X, TARGET_Z - Z
+            local distance = math.sqrt(dx * dx + dz * dz)
+            monitor.setCursorPos(1, 9)
+            monitor.write("Distance: " .. humanizeDistance(distance))
+            monitor.setCursorPos(1, 10)
+            monitor.write("Time left: " .. humanizeTime(distance / SHIP_SPEED))
+        end
+        os.sleep(0)
     end
 end
 
@@ -187,5 +315,7 @@ print("Start Zeppelin")
 parallel.waitForAll(
     calculateFuelConsumption,
     updateMonitor,
-    userInput
+    userInput,
+    calculateSpeedAndDirection,
+    autopilot
 )
