@@ -3,7 +3,9 @@
         "peripheral",
         "parallel",
         "colors",
-        "gps"
+        "gps",
+        "textutils",
+        "fs"
     ],
     "Lua.diagnostics.disable": [
         "undefined-field",

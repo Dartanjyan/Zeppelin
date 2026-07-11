@@ -1,16 +1,8 @@
-local rslink = peripheral.find("redstone_link_bridge")
 local rsRelay = peripheral.find("redstone_relay")
--- local keyboard = peripheral.find("tm_keyboard")
 local monitor = peripheral.find("monitor")
 local fluidTank = peripheral.find("create:fluid_tank")
-
-local function getLinkSignal(frequencies)
-    return rslink.getLinkSignal(frequencies[1], frequencies[2])
-end
-
-local function sendLinkSignal(frequencies, signal)
-    rslink.sendLinkSignal(frequencies[1], frequencies[2], signal)
-end
+local navTable = peripheral.find("navigation_table")
+-- local keyboard = peripheral.find("tm_keyboard")
 
 local function humanizeTime(seconds)
     if seconds <= 0 then return "infinite" end
@@ -51,31 +43,6 @@ local function validateCoordinates(input)
     return true, n1, n2
 end
 
-local function calculateMovement(x, z, lastX, lastZ, dt)
-    -- Предотвращаем деление на ноль
-    if dt <= 0 then return 0, 0 end
-
-    -- Вычисляем смещение
-    local dx = x - lastX
-    local dz = lastZ - z
-
-    -- Скорость = расстояние / время
-    -- Расстояние = sqrt(dx^2 + dz^2)
-    local distance = math.sqrt(dx * dx + dz * dz)
-    local speed = distance / dt
-
-    -- Направление (угол)
-    -- Используем math.atan2(dx, dz) для соответствия вашей системе:
-    -- +z (dz > 0) = 0 градусов
-    -- +x (dx > 0) = -90 градусов
-    -- -x (dx < 0) = 90 градусов
-    -- -z (dz < 0) = 180 градусов
-    local radians = math.atan2(dx, dz)
-    local degrees = math.deg(radians)
-
-    return speed, degrees
-end
-
 local function humanizeDistance(meters)
     -- Защита от некорректных данных
     if not meters or meters < 0 then return "0 m" end
@@ -100,18 +67,45 @@ local function clamp(x, min, max)
     return math.min(max, math.max(min, x))
 end
 
+local function loadConfig(path)
+    if not fs.exists(path) then error("Config not found: " .. path) end
+    local file = fs.open(path, "r")
+    local data = textutils.unserializeJSON(file.readAll())
+    file.close()
+    return data
+end
 
+local config = loadConfig("config.json")
 
--- FREQUENCIES = {
---     THRUSTERS = {
---         main = {"createpropulsion:thruster", "createpropulsion:thruster"},
---         frontLeft = {"createpropulsion:thruster", "minecraft:white_wool"},
---         frontRight = {"createpropulsion:thruster", "minecraft:light_gray_wool"},
---         backLeft = {"createpropulsion:thruster", "minecraft:gray_wool"},
---         backRight = {"createpropulsion:thruster", "minecraft:black_wool"},
---         steamVent = {"aeronautics:steam_vent", "aeronautics:steam_vent"}
---     }
--- }
+local function getAirshipPosition()
+    if not navTable then return nil, "Table not found" end
+
+    -- 1. Получаем данные
+    -- ВАЖНО: Проверь знак. Если getHeading дает -90, а должен быть 90, 
+    -- убери или добавь минус перед вызовом.
+    local yawDeg = -navTable.getHeading() 
+    local dist = navTable.getDistanceToTarget()
+    
+    -- Переводим yaw в радианы
+    local yawRad = math.rad(yawDeg)
+
+    -- 2. Вычисляем смещение от якоря до дирижабля
+    -- Если стол показывает "направление на якорь", то дирижабль находится 
+    -- с противоположной стороны от якоря.
+    local dx = dist * math.sin(yawRad)
+    local dz = dist * math.cos(yawRad)
+
+    -- 3. Вычисляем координаты дирижабля
+    -- Если стол смотрит на якорь, то дирижабль находится в (AnchorX - dx, AnchorZ - dz)
+    local shipX = config.anchor_pos[1] - dx
+    local shipZ = config.anchor_pos[2] - dz
+
+    return {
+        x = shipX,
+        z = shipZ,
+        yaw = yawDeg
+    }
+end
 
 AUTOPILOT_STATES = {
     PAUSED = 1,
@@ -132,7 +126,7 @@ TARGET_INPUT_BUFFER = ""
 AUTOPILOT_STATE = AUTOPILOT_STATES.PAUSED
 
 SHIP_SPEED = 0
-SHIP_DIRECTION = 0
+SHIP_YAW = 0
 
 X, ALTITUDE, Z = 0, 0, 0
 
@@ -155,12 +149,21 @@ local lastX, lastZ, lastClock = 0, 0, 0
 
 local function calculateSpeedAndDirection()
     while true do
-        local x, ALTITUDE, z = gps.locate()
-        local clock = os.clock()
-        SHIP_SPEED, SHIP_DIRECTION = calculateMovement(x, z, lastX, lastZ, clock - lastClock)
-        lastX, lastZ = x, z
-        X, Z = x, z
-        lastClock = clock
+        -- local x, ALTITUDE, z = gps.locate()
+        local telemetry = getAirshipPosition()
+        if telemetry then
+            local clock = os.clock()
+            SHIP_YAW = telemetry.yaw
+            
+            local dx, dz = telemetry.x - lastX, telemetry.z - lastZ
+            SHIP_SPEED = math.sqrt(dx * dx + dz * dz) / (clock - lastClock)
+            
+            lastX, lastZ = telemetry.x, telemetry.z
+            X, Z = telemetry.x, telemetry.z
+            lastClock = clock
+        else
+            print(err)
+        end
         os.sleep(1)
     end
 end
@@ -170,8 +173,6 @@ local function isAutopilotLeverEnabled()
 end
 
 local function autopilot()
-    -- Проверить включен ли автопилот
-    -- Взять координаты целевые и лететь туда
     while true do
         if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING and isAutopilotLeverEnabled() then
             -- Рассчитать нужный угол
@@ -186,7 +187,7 @@ local function autopilot()
             local radians = math.atan2(dx, dz)
             local targetDegrees = math.deg(radians)
 
-            local directionError = targetDegrees - SHIP_DIRECTION
+            local directionError = targetDegrees - SHIP_YAW
             if directionError > 180 then directionError = directionError - 360
             elseif directionError < -180 then directionError = directionError + 360
             end
@@ -323,6 +324,10 @@ local function updateMonitor()
             monitor.setCursorPos(1, 10)
             monitor.write("Time left: " .. humanizeTime(distance / SHIP_SPEED))
         end
+
+        monitor.setCursorPos(1, 11)
+        monitor.write("Yaw: " .. math.floor(SHIP_YAW*10)/10)
+
         os.sleep(0)
     end
 end
