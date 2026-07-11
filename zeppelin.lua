@@ -1,6 +1,6 @@
 local rslink = peripheral.find("redstone_link_bridge")
 local rsRelay = peripheral.find("redstone_relay")
-local keyboard = peripheral.find("tm_keyboard")
+-- local keyboard = peripheral.find("tm_keyboard")
 local monitor = peripheral.find("monitor")
 local fluidTank = peripheral.find("create:fluid_tank")
 
@@ -96,6 +96,12 @@ local function humanizeDistance(meters)
     end
 end
 
+local function clamp(x, min, max)
+    return math.min(max, math.max(min, x))
+end
+
+
+
 -- FREQUENCIES = {
 --     THRUSTERS = {
 --         main = {"createpropulsion:thruster", "createpropulsion:thruster"},
@@ -160,14 +166,14 @@ local function calculateSpeedAndDirection()
 end
 
 local function isAutopilotLeverEnabled()
-    return rslink.getInput("top")
+    return rsRelay.getInput("top")
 end
 
 local function autopilot()
     -- Проверить включен ли автопилот
     -- Взять координаты целевые и лететь туда
     while true do
-        if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING then
+        if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING and isAutopilotLeverEnabled() then
             -- Рассчитать нужный угол
             -- Градационно в зависимости от ошибки угла подстраивать курс
             
@@ -197,9 +203,13 @@ local function autopilot()
             local rightTurn = 16/180 * directionError
             local leftTurn = -rightTurn
 
-            rslink.setAnalogOutput("left", leftTurn)
-            rslink.setAnalogOutput("right", rightTurn)
-            rslink.setAnalogOutput("front", throttle)
+            rsRelay.setAnalogOutput("left", clamp(leftTurn, 0, 15))
+            rsRelay.setAnalogOutput("right", clamp(rightTurn, 0, 15))
+            rsRelay.setAnalogOutput("front", clamp(throttle, 0, 15))
+        else
+            rsRelay.setAnalogOutput("left", 0)
+            rsRelay.setAnalogOutput("right", 0)
+            rsRelay.setAnalogOutput("front", 0)
         end
         os.sleep(1)
     end
@@ -211,6 +221,7 @@ local function userInput()
     -- Все цифровые ивенты и пробел это набор координат code 48 - 57
     -- Enter это переключение состояния автопилота code 257
     -- Backspace ставит автопилот на паузу и стирает цифру координат code 259
+    -- 320 - 329 цифры нампад
 
     while true do
         local _, _, key = os.pullEvent("tm_keyboard_key")
@@ -250,6 +261,12 @@ local function userInput()
         end
 
         TARGET_INPUT_BUFFER = TARGET_INPUT_BUFFER .. symbol
+    end
+end
+
+local function handlePaste()
+    while true do
+        
     end
 end
 
