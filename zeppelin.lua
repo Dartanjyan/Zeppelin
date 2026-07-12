@@ -63,10 +63,6 @@ local function humanizeDistance(meters)
     end
 end
 
-local function clamp(x, min, max)
-    return math.min(max, math.max(min, x))
-end
-
 local function loadConfig(path)
     if not fs.exists(path) then error("Config not found: " .. path) end
     local file = fs.open(path, "r")
@@ -83,7 +79,9 @@ local function getAirshipPosition()
     -- 1. Получаем данные
     -- ВАЖНО: Проверь знак. Если getHeading дает -90, а должен быть 90, 
     -- убери или добавь минус перед вызовом.
-    local yawDeg = -navTable.getHeading() 
+    local relAngle = navTable.getRelativeAngle()
+    local heading = -navTable.getHeading()
+    local yawDeg = heading + relAngle
     local dist = navTable.getDistanceToTarget()
     
     -- Переводим yaw в радианы
@@ -92,8 +90,8 @@ local function getAirshipPosition()
     -- 2. Вычисляем смещение от якоря до дирижабля
     -- Если стол показывает "направление на якорь", то дирижабль находится 
     -- с противоположной стороны от якоря.
-    local dx = dist * math.sin(yawRad)
-    local dz = dist * math.cos(yawRad)
+    local dx = dist * math.cos(yawRad)
+    local dz = dist * math.sin(yawRad)
 
     -- 3. Вычисляем координаты дирижабля
     -- Если стол смотрит на якорь, то дирижабль находится в (AnchorX - dx, AnchorZ - dz)
@@ -103,7 +101,7 @@ local function getAirshipPosition()
     return {
         x = shipX,
         z = shipZ,
-        yaw = yawDeg
+        yaw = heading
     }
 end
 
@@ -128,7 +126,10 @@ AUTOPILOT_STATE = AUTOPILOT_STATES.PAUSED
 SHIP_SPEED = 0
 SHIP_YAW = 0
 
-X, ALTITUDE, Z = 0, 0, 0
+DISTANCE_TO_TARGET = 0
+DISTANCE_TO_TARGET_READY = false
+
+X, Z = 0, 0
 
 local lastFuel = 0
 local function calculateFuelConsumption()
@@ -149,8 +150,7 @@ local lastX, lastZ, lastClock = 0, 0, 0
 
 local function calculateSpeedAndDirection()
     while true do
-        -- local x, ALTITUDE, z = gps.locate()
-        local telemetry = getAirshipPosition()
+        local telemetry, err = getAirshipPosition()
         if telemetry then
             local clock = os.clock()
             SHIP_YAW = telemetry.yaw
@@ -172,25 +172,32 @@ local function isAutopilotLeverEnabled()
     return rsRelay.getInput("top")
 end
 
+--/----------------- DEBUG STUFF ------------------------
+TGT_YAW, YAW_ERROR = 0,0
+--\----------------- DEBUG STUFF ------------------------
+
 local function autopilot()
     while true do
-        if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING and isAutopilotLeverEnabled() then
-            -- Рассчитать нужный угол
-            -- Градационно в зависимости от ошибки угла подстраивать курс
-            
-            -- Вектор направления на цель
+        if not (AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING --[[and isAutopilotLeverEnabled()]]) then
+            rsRelay.setAnalogOutput("left", 0)
+            rsRelay.setAnalogOutput("right", 0)
+            rsRelay.setAnalogOutput("front", 0)
+        elseif DISTANCE_TO_TARGET <= 100 and DISTANCE_TO_TARGET_READY then
+                AUTOPILOT_STATE = AUTOPILOT_STATES.PAUSED
+                DISTANCE_TO_TARGET_READY = false
+        else
             local dx = TARGET_X - X
-            -- Применяем ту же инверсию для Z, которая сработала у вас
-            local dz = Z - TARGET_Z
+            local dz = TARGET_Z - Z
+            DISTANCE_TO_TARGET = math.sqrt(dx * dx + dz * dz)
+            DISTANCE_TO_TARGET_READY = true
 
-            -- Вычисляем угол в радианах и переводим в градусы
-            local radians = math.atan2(dx, dz)
-            local targetDegrees = math.deg(radians)
-
-            local directionError = targetDegrees - SHIP_YAW
-            if directionError > 180 then directionError = directionError - 360
-            elseif directionError < -180 then directionError = directionError + 360
+            local targetYaw = -math.deg(math.atan2(dx, dz))
+            
+            local yawError = targetYaw - SHIP_YAW
+            if yawError > 180 then yawError = yawError - 360
+            elseif yawError < -180 then yawError = yawError + 360
             end
+            TGT_YAW, YAW_ERROR = targetYaw, yawError
 
             -- 180 макс
             -- 0 это мин
@@ -199,18 +206,24 @@ local function autopilot()
             -- Поворот направо: макс при ошибке 180 и мин при 0
             -- Поворот налево: макс при ошибке -180 и минимум при нуле
 
-            -- thr = (-16)/180
-            local throttle = (-16)/180 * math.abs(directionError) + 16
-            local rightTurn = 16/180 * directionError
-            local leftTurn = -rightTurn
+            local function turnFunction(x)
+                if x < 0 then return 0
+                elseif x >= 180 then return 15
+                else return math.sqrt(x * 1.25) end  -- math.sqrt(x * 15^2 / 180)
+            end
 
-            rsRelay.setAnalogOutput("left", clamp(leftTurn, 0, 15))
-            rsRelay.setAnalogOutput("right", clamp(rightTurn, 0, 15))
-            rsRelay.setAnalogOutput("front", clamp(throttle, 0, 15))
-        else
-            rsRelay.setAnalogOutput("left", 0)
-            rsRelay.setAnalogOutput("right", 0)
-            rsRelay.setAnalogOutput("front", 0)
+            local function throttleFunction(x)
+                local y = 180 * x^-2
+                if y < 0 then return 0
+                elseif y > 15 then return 15
+                else return y end
+            end
+
+            rsRelay.setAnalogOutput("right", turnFunction(yawError))
+            rsRelay.setAnalogOutput("left", turnFunction(-yawError))
+            rsRelay.setAnalogOutput("front", throttleFunction(yawError))
+
+            -- print("Tgt, err: " .. math.floor(targetYaw*10)/10 .. ", " .. math.floor(yawError*100)/100)
         end
         os.sleep(1)
     end
@@ -221,24 +234,23 @@ local function userInput()
     -- Минус code 45
     -- Все цифровые ивенты и пробел это набор координат code 48 - 57
     -- Enter это переключение состояния автопилота code 257
+    -- Numpad Enter 335
     -- Backspace ставит автопилот на паузу и стирает цифру координат code 259
     -- 320 - 329 цифры нампад
 
     while true do
+        local startedAutopilot = false
+
         local _, _, key = os.pullEvent("tm_keyboard_key")
         -- "tm_keyboard_key", "top", keyCode, continuous
         -- print(key)
         local symbol = ""
 
-        if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING then
-            AUTOPILOT_STATE = AUTOPILOT_STATES.PAUSED
-        end
-
         if key == 32 then symbol = " "
         elseif key == 45 then symbol = "-"
         elseif key >= 48 and key <= 57 then symbol = tostring(key - 48)
         elseif key >= 320 and key <= 329 then symbol = tostring(key - 320)
-        elseif key == 257 then
+        elseif key == 257 or key == 335 then
             --[[if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING then
                 AUTOPILOT_STATE = AUTOPILOT_STATES.PAUSED
             else]]if AUTOPILOT_STATE == AUTOPILOT_STATES.PAUSED or AUTOPILOT_STATE == AUTOPILOT_STATES.ERROR then
@@ -248,6 +260,7 @@ local function userInput()
                     TARGET_X = x
                     TARGET_Z = z
                     AUTOPILOT_STATE = AUTOPILOT_STATES.RUNNING
+                    startedAutopilot = true
                 else
                     AUTOPILOT_STATE = AUTOPILOT_STATES.ERROR
                 end
@@ -259,6 +272,10 @@ local function userInput()
             if #TARGET_INPUT_BUFFER > 0 then
                 TARGET_INPUT_BUFFER = string.sub(TARGET_INPUT_BUFFER, 1, -2)
             end
+        end
+
+        if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING and not startedAutopilot then
+            AUTOPILOT_STATE = AUTOPILOT_STATES.PAUSED
         end
 
         TARGET_INPUT_BUFFER = TARGET_INPUT_BUFFER .. symbol
@@ -317,16 +334,19 @@ local function updateMonitor()
         monitor.setCursorPos(1, 8)
         monitor.write("Speed: " .. math.floor(SHIP_SPEED * 3.6 * 100) / 100 .. " km/h")
         if isAutopilotLeverEnabled() then
-            local dx, dz = TARGET_X - X, TARGET_Z - Z
-            local distance = math.sqrt(dx * dx + dz * dz)
             monitor.setCursorPos(1, 9)
-            monitor.write("Distance: " .. humanizeDistance(distance))
+            monitor.write("Distance: " .. humanizeDistance(DISTANCE_TO_TARGET))
             monitor.setCursorPos(1, 10)
-            monitor.write("Time left: " .. humanizeTime(distance / SHIP_SPEED))
+            monitor.write("Time left: " .. humanizeTime(DISTANCE_TO_TARGET / SHIP_SPEED))
         end
 
-        monitor.setCursorPos(1, 11)
-        monitor.write("Yaw: " .. math.floor(SHIP_YAW*10)/10)
+        -- monitor.setCursorPos(1, 11)
+        -- monitor.write("Yaw: " .. math.floor(SHIP_YAW*10)/10)
+
+        -- monitor.setCursorPos(1, 12)
+        -- monitor.write("Tgt, err: " .. math.floor(TGT_YAW*10)/10 .. ", " .. math.floor(YAW_ERROR*100)/100)
+        -- monitor.setCursorPos(1, 13)
+        -- monitor.write("Pos: " .. math.floor(X) .. " " .. math.floor(Z))
 
         os.sleep(0)
     end
