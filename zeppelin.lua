@@ -2,7 +2,6 @@ local rsRelay = peripheral.find("redstone_relay")
 local monitor = peripheral.find("monitor")
 local fluidTank = peripheral.find("create:fluid_tank")
 local navTable = peripheral.find("navigation_table")
--- local keyboard = peripheral.find("tm_keyboard")
 
 local function humanizeTime(seconds)
     if seconds <= 0 then return "infinite" end
@@ -63,6 +62,10 @@ local function humanizeDistance(meters)
     end
 end
 
+local function sign(number)
+    return number > 0 and 1 or (number == 0 and 0 or -1)
+end
+
 local function loadConfig(path)
     if not fs.exists(path) then error("Config not found: " .. path) end
     local file = fs.open(path, "r")
@@ -113,6 +116,8 @@ AUTOPILOT_STATES = {
 
 -- GLOBAL STATE --
 FUEL_CAPACITY = 1656000
+AUTOPILOT_STOP_DISTANCE = 100
+
 FUEL = 0
 FUEL_CONSUMPTION = 0  -- in seconds
 FUEL_SECONDS_LEFT = 0
@@ -127,28 +132,39 @@ SHIP_SPEED = 0
 SHIP_YAW = 0
 
 DISTANCE_TO_TARGET = 0
-DISTANCE_TO_TARGET_READY = false
+DISTANCE_TO_TARGET_CALCULATED = false
 
 X, Z = 0, 0
 
-local lastFuel = 0
 local function calculateFuelConsumption()
+    local lastFuel = 0
+    local lastClock = 0
+    local clock = 0
     while true do
+        clock = os.clock()
+
         FUEL = fluidTank.tanks()[1].amount
-        FUEL_CONSUMPTION = -(FUEL - lastFuel)
-        lastFuel = FUEL
+        if FUEL then
+            FUEL_CONSUMPTION = (lastFuel - FUEL) / (clock - lastClock)
+        else
+            FUEL_CONSUMPTION = 0
+        end
+
         if FUEL_CONSUMPTION == 0 then
             FUEL_SECONDS_LEFT = -1
         else
             FUEL_SECONDS_LEFT = FUEL / FUEL_CONSUMPTION
         end
+        
+        lastFuel = FUEL
+        lastClock = clock
         os.sleep(2)
     end
 end
 
-local lastX, lastZ, lastClock = 0, 0, 0
 
 local function calculateSpeedAndDirection()
+    local lastX, lastZ, lastClock = 0, 0, 0
     while true do
         local telemetry, err = getAirshipPosition()
         if telemetry then
@@ -172,78 +188,56 @@ local function isAutopilotLeverEnabled()
     return rsRelay.getInput("top")
 end
 
---/----------------- DEBUG STUFF ------------------------
-TGT_YAW, YAW_ERROR = 0,0
---\----------------- DEBUG STUFF ------------------------
-
 local function autopilot()
     while true do
-        if not (AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING --[[and isAutopilotLeverEnabled()]]) then
+        if not (AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING and isAutopilotLeverEnabled()) then
             rsRelay.setAnalogOutput("left", 0)
             rsRelay.setAnalogOutput("right", 0)
             rsRelay.setAnalogOutput("front", 0)
-        elseif DISTANCE_TO_TARGET <= 100 and DISTANCE_TO_TARGET_READY then
-                AUTOPILOT_STATE = AUTOPILOT_STATES.PAUSED
-                DISTANCE_TO_TARGET_READY = false
+        elseif DISTANCE_TO_TARGET_CALCULATED and DISTANCE_TO_TARGET <= AUTOPILOT_STOP_DISTANCE then
+            AUTOPILOT_STATE = AUTOPILOT_STATES.PAUSED
+            DISTANCE_TO_TARGET_CALCULATED = false
         else
             local dx = TARGET_X - X
             local dz = TARGET_Z - Z
             DISTANCE_TO_TARGET = math.sqrt(dx * dx + dz * dz)
-            DISTANCE_TO_TARGET_READY = true
+            DISTANCE_TO_TARGET_CALCULATED = true
 
             local targetYaw = -math.deg(math.atan2(dx, dz))
-            
-            local yawError = targetYaw - SHIP_YAW
-            if yawError > 180 then yawError = yawError - 360
-            elseif yawError < -180 then yawError = yawError + 360
-            end
-            TGT_YAW, YAW_ERROR = targetYaw, yawError
 
-            -- 180 макс
-            -- 0 это мин
-            -- -180 макс в другую сторону
-            -- Газ: максимальный при 0 ошибке
-            -- Поворот направо: макс при ошибке 180 и мин при 0
-            -- Поворот налево: макс при ошибке -180 и минимум при нуле
+            local yawError = targetYaw - SHIP_YAW
+            yawError = yawError - 360 * math.floor(math.log(math.abs(yawError), 180)) * sign(yawError)
 
             local function turnFunction(x)
-                if x < 0 then return 0
-                elseif x >= 180 then return 15
-                else return math.sqrt(x * 1.25) end  -- math.sqrt(x * 15^2 / 180)
+                return x < 0 and 0 or x >= 180 and 15 or math.sqrt(x * 1.25)  -- math.sqrt(x * 15^2 / 180)
             end
 
             local function throttleFunction(x)
                 local y = 180 * x^-2
-                if y < 0 then return 0
-                elseif y > 15 then return 15
-                else return y end
+                return y < 0 and 0 or y > 15 and 15 or y
             end
 
             rsRelay.setAnalogOutput("right", turnFunction(yawError))
             rsRelay.setAnalogOutput("left", turnFunction(-yawError))
             rsRelay.setAnalogOutput("front", throttleFunction(yawError))
-
-            -- print("Tgt, err: " .. math.floor(targetYaw*10)/10 .. ", " .. math.floor(yawError*100)/100)
         end
-        os.sleep(1)
+        os.sleep(0.5)
     end
 end
 
 local function userInput()
-    -- Пробел ставит пробел между координатами code 32
-    -- Минус code 45
-    -- Все цифровые ивенты и пробел это набор координат code 48 - 57
-    -- Enter это переключение состояния автопилота code 257
-    -- Numpad Enter 335
-    -- Backspace ставит автопилот на паузу и стирает цифру координат code 259
+    -- Пробел 32
+    -- Минус 45
+    -- Цифры 48 - 57
     -- 320 - 329 цифры нампад
+    -- Enter 257
+    -- Numpad Enter 335
+    -- Backspace 259
 
     while true do
-        local startedAutopilot = false
+        local justStartedAutopilot = false
 
         local _, _, key = os.pullEvent("tm_keyboard_key")
-        -- "tm_keyboard_key", "top", keyCode, continuous
-        -- print(key)
         local symbol = ""
 
         if key == 32 then symbol = " "
@@ -251,22 +245,22 @@ local function userInput()
         elseif key >= 48 and key <= 57 then symbol = tostring(key - 48)
         elseif key >= 320 and key <= 329 then symbol = tostring(key - 320)
         elseif key == 257 or key == 335 then
-            --[[if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING then
-                AUTOPILOT_STATE = AUTOPILOT_STATES.PAUSED
-            else]]if AUTOPILOT_STATE == AUTOPILOT_STATES.PAUSED or AUTOPILOT_STATE == AUTOPILOT_STATES.ERROR then
+            -- Enter
+            if AUTOPILOT_STATE == AUTOPILOT_STATES.PAUSED or AUTOPILOT_STATE == AUTOPILOT_STATES.ERROR then
                 local success, x, z = validateCoordinates(TARGET_INPUT_BUFFER)
                 if success then
                     TARGET_INPUT_BUFFER = x .. " " .. z
-                    TARGET_X = x
-                    TARGET_Z = z
+                    TARGET_X, TARGET_Z = x, z
                     AUTOPILOT_STATE = AUTOPILOT_STATES.RUNNING
-                    startedAutopilot = true
+                    justStartedAutopilot = true
                 else
                     AUTOPILOT_STATE = AUTOPILOT_STATES.ERROR
                 end
             end
         elseif key == 259 then
-            if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING or AUTOPILOT_STATE == AUTOPILOT_STATES.ERROR then
+            -- Backspace
+            if AUTOPILOT_STATE == AUTOPILOT_STATES.ERROR then
+                -- No need to check if was running, it'll be checked later anyways
                 AUTOPILOT_STATE = AUTOPILOT_STATES.PAUSED
             end
             if #TARGET_INPUT_BUFFER > 0 then
@@ -274,7 +268,7 @@ local function userInput()
             end
         end
 
-        if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING and not startedAutopilot then
+        if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING and not justStartedAutopilot then
             AUTOPILOT_STATE = AUTOPILOT_STATES.PAUSED
         end
 
@@ -291,62 +285,44 @@ end
 local function updateMonitor()
     while true do
         monitor.setTextColor(colors.white)
-        monitor.setBackgroundColor(colors.black)
+        -- monitor.setBackgroundColor(colors.black)
         monitor.clear()
+
         monitor.setCursorPos(1, 1)
         monitor.write("Fuel: " .. math.floor(FUEL / FUEL_CAPACITY * 1000) / 10 .. "%")
         monitor.setCursorPos(1, 2)
         monitor.write("Consumption: " .. FUEL_CONSUMPTION/1000 .. " B/s")
         monitor.setCursorPos(1, 3)
-        monitor.write("Time left: " .. humanizeTime(FUEL_SECONDS_LEFT))
+        monitor.write("Fuel left for: " .. humanizeTime(FUEL_SECONDS_LEFT))
 
         -- Autopilot status bar
         monitor.setCursorPos(1, 5)
-        monitor.setTextColor(colors.black)
         if AUTOPILOT_STATE == AUTOPILOT_STATES.RUNNING then
-            -- monitor.setBackgroundColor(colors.lime)
-            -- monitor.clearLine()
             monitor.setTextColor(colors.lime)
             monitor.write("AUTOPILOT STATE: RUNNING")
         elseif AUTOPILOT_STATE == AUTOPILOT_STATES.PAUSED then
-            -- monitor.setBackgroundColor(colors.lightBlue)
-            -- monitor.clearLine()
             monitor.setTextColor(colors.lightBlue)
             monitor.write("AUTOPILOT STATE: PAUSED")
         elseif AUTOPILOT_STATE == AUTOPILOT_STATES.ERROR then
-            -- monitor.setBackgroundColor(colors.red)
-            -- monitor.clearLine()
             monitor.setTextColor(colors.red)
             monitor.write("AUTOPILOT STATE: ERROR")
         end
         
-        monitor.setCursorPos(1, 4)
-        monitor.clearLine()
-        monitor.setCursorPos(1, 6)
-        monitor.clearLine()
         -- Autopilot status bar
 
         monitor.setBackgroundColor(colors.black)
         monitor.setTextColor(colors.white)
 
         monitor.setCursorPos(1, 7)
-        monitor.write("Target: " .. TARGET_INPUT_BUFFER)
-        monitor.setCursorPos(1, 8)
         monitor.write("Speed: " .. math.floor(SHIP_SPEED * 3.6 * 100) / 100 .. " km/h")
+        monitor.setCursorPos(1, 8)
+        monitor.write("Target: " .. TARGET_INPUT_BUFFER)
         if isAutopilotLeverEnabled() then
             monitor.setCursorPos(1, 9)
             monitor.write("Distance: " .. humanizeDistance(DISTANCE_TO_TARGET))
             monitor.setCursorPos(1, 10)
             monitor.write("Time left: " .. humanizeTime(DISTANCE_TO_TARGET / SHIP_SPEED))
         end
-
-        -- monitor.setCursorPos(1, 11)
-        -- monitor.write("Yaw: " .. math.floor(SHIP_YAW*10)/10)
-
-        -- monitor.setCursorPos(1, 12)
-        -- monitor.write("Tgt, err: " .. math.floor(TGT_YAW*10)/10 .. ", " .. math.floor(YAW_ERROR*100)/100)
-        -- monitor.setCursorPos(1, 13)
-        -- monitor.write("Pos: " .. math.floor(X) .. " " .. math.floor(Z))
 
         os.sleep(0)
     end
